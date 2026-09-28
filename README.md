@@ -2,6 +2,8 @@
 *Predictions of Small-Body Physical Traits Based on Orbital Characteristics for Mining of Precious Metals for Use in MHD Satellites* \
 Commissioned by the [Ethereal Mining Company (EMC)](https://github.com/Ethereal-Mining-Company)
 
+![Solar System Orbital Sorting Map](images/asteroid_orbital_sorting_map.png)
+
 >[!CAUTION]
 >This is a fictional project as part of a broader D&D universe campaign for entertainment use only. It may be integrated into educational projects as flavor text to help simulate working in real-world environments.
 
