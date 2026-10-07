@@ -2,9 +2,9 @@ test_mode: false
 paths:
   dataset: "data/dataset-jpl-small-body-asteroids.csv"
   dataset_cleaned: "data/cleaned-dataset-jpl-small-body-asteroids.csv"
-  model_dir: "models"
-  experiment_log: "results/model_experiment_log.csv"
-  experiment_folds_log: "results/model_experiment_folds_log.csv"
+  model_dir: "artifacts"
+  experiment_log: "logs/model_experiment_log.csv"
+  experiment_folds_log: "logs/model_experiment_folds_log.csv"
 
 features:
   x_restricted:
@@ -18,6 +18,11 @@ features:
     - "H"
   target: "diameter"
   target_col: "diameter_log"
+
+evaluation_params:
+  delta_threshold: 0.05
+  cv_folds: 5
+  global_seed: 42 
 
 data_params:
   val_split: 0.15

@@ -219,3 +219,7 @@ __marimo__/
 
 # Misc
 .DS_store
+__pycache__/
+*.pyc
+**/testing/
+**/diagnostics/

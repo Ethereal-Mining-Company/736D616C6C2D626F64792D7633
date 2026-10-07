@@ -5,6 +5,7 @@ os.environ["KERAS_TORCH_DEVICE"] = "cpu"
 import csv
 import json
 import uuid
+import glob
 from datetime import datetime
 import yaml
 import joblib
@@ -57,20 +58,19 @@ def _generate_metadata_payload(
 
     underlying_regressor = fitted_pipeline.named_steps["regressor"]
 
-    # 1. Handle Feature Importances Safely
+    # Handle Feature Importances Safely
     if hasattr(underlying_regressor, "feature_importances_"):
         importances = underlying_regressor.feature_importances_.tolist()
         imp_dict = dict(zip(feature_names, importances))
     else:
         imp_dict = {"info": "Permutation importance required for feature weights in neural network configurations"}
 
-    # 2. Handle Hyperparameters Safely (Skl vs Keras)
+    # Handle Hyperparameters Safely (Skl vs Keras)
     if hyperparameters is not None:
         params_payload = hyperparameters
     elif hasattr(underlying_regressor, "get_params"):
         params_payload = underlying_regressor.get_params()
     else:
-        # Fallback if it's a raw Keras model and no manual dictionary was passed
         params_payload = {"info": "Keras Sequential architecture configuration"}
 
     return {
@@ -99,43 +99,38 @@ def _generate_metadata_payload(
         }
     }
 
-
-def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg):
-    is_test_mode = cfg.get("test_mode", False) or (model_params and model_params.get("test_mode", False))
-    master_log_path = cfg["paths"]["experiment_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_log"]
+def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg, test_mode: bool = False):
+    is_test_mode = cfg.get("test_mode", False) or test_mode
+    main_log_path = cfg["paths"]["experiment_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_log"]
     folds_log_path = cfg["paths"]["experiment_folds_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_folds_log"]
-    timestamp_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    master_entry = {
+    timestamp_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    params_string_lump = str(model_params)
+
+    main_entry = {
         "timestamp": timestamp_str,
         "model_uuid": model_uuid,
         "engine_name": engine_name,
-        "batch_size": model_params.get("batch_size", "N/A"),
-        "learning_rate": model_params.get("learning_rate", "N/A"),
-        "epochs": model_params.get("epochs", "N/A"),
         "full_mean_cv_r2": run_dict["summary_averages"]["full_mean_cv_r2"],
         "restricted_mean_cv_r2": run_dict["summary_averages"]["restricted_mean_cv_r2"],
         "calculated_delta_r2": run_dict["hypothesis_results"]["calculated_delta_r2"],
         "full_mean_cv_mae_km": run_dict["summary_averages"]["full_mean_cv_mae_km"],
         "restricted_mean_cv_mae_km": run_dict["summary_averages"]["restricted_mean_cv_mae_km"],
         "statistical_conclusion": run_dict["hypothesis_results"]["statistical"]["conclusion"],
-        "operational_conclusion": run_dict["hypothesis_results"]["operational"]["conclusion"]
+        "operational_conclusion": run_dict["hypothesis_results"]["operational"]["conclusion"],
+        "model_parameters": params_string_lump  # Placed explicitly as the final terminal column field
     }
-    
-    df_master = pd.DataFrame([master_entry])
-    master_header = not os.path.exists(master_log_path)
-    df_master.to_csv(master_log_path, mode="a", index=False, header=master_header)
+    df_main = pd.DataFrame([main_entry])
+    main_header = not os.path.exists(main_log_path)
+    df_main.to_csv(main_log_path, mode="a", index=False, header=main_header)
     
     raw_folds = run_dict.get("raw_folds", {})
     fold_ids = raw_folds.get("fold_ids", [])
     
     if fold_ids:
         fold_records = []
-        full_r2 = raw_folds.get("full_r2_per_fold", [])
-        rest_r2 = raw_folds.get("restricted_r2_per_fold", [])
-        delta_r2 = raw_folds.get("delta_r2_per_fold", [])
-        full_mae = raw_folds.get("full_mae_km_per_fold", [])
-        rest_mae = raw_folds.get("restricted_mae_km_per_fold", [])
+        full_r2, rest_r2 = raw_folds.get("full_r2_per_fold", []), raw_folds.get("restricted_r2_per_fold", [])
+        delta_r2, full_mae, rest_mae = raw_folds.get("delta_r2_per_fold", []), raw_folds.get("full_mae_km_per_fold", []), raw_folds.get("restricted_mae_km_per_fold", [])
         
         for i in range(len(fold_ids)):
             fold_records.append({
@@ -147,15 +142,16 @@ def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg):
                 "restricted_model_r2": rest_r2[i] if i < len(rest_r2) else None,
                 "delta_r2": delta_r2[i] if i < len(delta_r2) else None,
                 "full_model_mae_km": full_mae[i] if i < len(full_mae) else None,
-                "restricted_model_mae_km": rest_mae[i] if i < len(rest_mae) else None
+                "restricted_model_mae_km": rest_mae[i] if i < len(rest_mae) else None,
+                "model_parameters": params_string_lump  # Placed explicitly as the final terminal column field
             })
             
         df_folds = pd.DataFrame(fold_records)
         folds_header = not os.path.exists(folds_log_path)
         df_folds.to_csv(folds_log_path, mode="a", index=False, header=folds_header)
         
-    print(f"Success! Master metrics appended to: {master_log_path}")
-    print(f"Success! Cross-validation arrays appended to: {folds_log_path}")
+    print(f"Success! Main metrics logged to: {main_log_path}")
+    print(f"Success! Cross-validation arrays logged to: {folds_log_path}")
 
 def train_model(
     engine_type: str = "rf",
@@ -164,7 +160,8 @@ def train_model(
     override_params: Dict[str, Any] = None,
     override_x_full: List[str] = None,
     override_x_restricted: List[str] = None,
-    delta_threshold: float = 0.05
+    delta_threshold: float = 0.05,
+    test_mode: bool = False
 ) -> dict:
     
     engine_type_clean = engine_type.lower()
@@ -178,7 +175,7 @@ def train_model(
         else:
             architecture_type = "wide_deep"
             
-        print(f"[ROUTER] Passing pipeline execution to Native Keras Engine ({architecture_type.upper()})...")
+        print(f"[ROUTER] Passing pipeline execution to Keras Engine ({architecture_type.upper()})...")
         return train_keras_model(
             dataset_cleaned_path=dataset_cleaned_path,
             config_path=config_path,
@@ -186,7 +183,8 @@ def train_model(
             override_x_full=override_x_full,
             override_x_restricted=override_x_restricted,
             delta_threshold=delta_threshold,
-            architecture_type=architecture_type
+            architecture_type=architecture_type,
+            test_mode=test_mode
         )
     elif engine_type_clean in ["rf", "random_forest", "xgboost", "xgb", "gradient"]:
         print(f"[ROUTER] Passing pipeline execution to Traditional Tree Engine ({engine_type_clean.upper()})...")
@@ -197,7 +195,8 @@ def train_model(
             override_params=override_params,
             override_x_full=override_x_full,
             override_x_restricted=override_x_restricted,
-            delta_threshold=delta_threshold
+            delta_threshold=delta_threshold,
+            test_mode=test_mode
         )
         
     else:
@@ -206,38 +205,40 @@ def train_model(
             f"Allowed values are: ['rf', 'xgboost', 'keras_wide_deep', 'keras_resnet', 'ft_transformer']"
         )
 
-def predict_model(input_data: Union[dict, pd.DataFrame], engine_type: str = "rf", model_type: str = "full", config_path: str = "config.yaml") -> Union[float, List[float], dict]:
+def predict_model(
+    input_data: Union[dict, pd.DataFrame], 
+    engine_type: str = "rf", 
+    model_type: str = "full", 
+    config_path: str = "config.yaml",
+    test_mode: bool = False
+) -> Union[float, List[float], dict]:
     cfg = load_config(config_path)
+    is_testing_mode = cfg.get("test_mode", False) or test_mode
     engine_type, model_type_clean = engine_type.lower(), model_type.lower()
+    
     allowed_engines = ["rf", "xgboost", "xgb", "gradient", "keras_wide_deep", "keras_resnet", "ft_transformer", "ft_t", "transformer", "keras_ft_transformer", "keras_gated_resnet"]
     if engine_type not in allowed_engines:
         raise ValueError(f"engine_type must be one of: {allowed_engines}")
     
     if model_type_clean == "both":
         return {
-            "full_model_prediction": predict_model(input_data, engine_type, "full", config_path),
-            "restricted_model_prediction": predict_model(input_data, engine_type, "restricted", config_path)
+            "full_model_prediction": predict_model(input_data, engine_type, "full", config_path, test_mode=is_testing_mode),
+            "restricted_model_prediction": predict_model(input_data, engine_type, "restricted", config_path, test_mode=is_testing_mode)
         }
     
     if model_type_clean not in ["full", "restricted"]:
         raise ValueError("model_type must be either 'full', 'restricted', or 'both'.")
+        
     df_input = pd.DataFrame([input_data]) if isinstance(input_data, dict) else input_data.copy()
-    
-    model_dir = cfg["paths"]["model_dir"]
-    
-    # ====================================================================================
-    # NATIVE PYTORCH TABULAR INFERENCE (FT-TRANSFORMER ATTENTION ENGINE)
-    # ====================================================================================
-    if engine_type in ["ft_transformer", "ft_t", "transformer"]:
-        model_path = os.path.join(model_dir, "ft_transformer_full_model")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Production FT-Transformer archive missing at '{model_path}'.")
-        model = TabularModel.load_model(model_path)
-        preds_df = model.predict(df_input, json_output=False)
-        target_col = cfg["features"]["target_col"]
-        log_prediction = preds_df[f"{target_col}_prediction"].values.ravel()
 
-    elif engine_type.startswith("keras_"):
+    base_model_dir = cfg["paths"]["model_dir"]
+    run_type_dir = "testing" if is_testing_mode else "production"
+    model_dir = os.path.join(base_model_dir, run_type_dir) 
+
+    if engine_type in ["ft_transformer", "ft_t", "transformer"]:
+        engine_type = "keras_ft_transformer"
+        
+    if engine_type.startswith("keras_"):
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.keras")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Production Keras binary missing at '{model_path}'.")
@@ -245,7 +246,6 @@ def predict_model(input_data: Union[dict, pd.DataFrame], engine_type: str = "rf"
         feature_key = "x_full" if model_type_clean == "full" else "x_restricted"
         X_matrix = df_input[cfg["features"][feature_key]].astype(np.float32).values
         log_prediction = model.predict(X_matrix, verbose=0).ravel()
-        
     else:
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.pkl")
         if not os.path.exists(model_path) and f"{model_type_clean}_model" in cfg["paths"]:
@@ -276,10 +276,15 @@ def train_traditional_model(
     override_params: Dict[str, Any] = None,
     override_x_full: List[str] = None,
     override_x_restricted: List[str] = None,
-    delta_threshold: float = 0.05
+    delta_threshold: float = 0.05,
+    test_mode: bool = False
 ) -> dict:
     
     cfg = load_config(config_path)
+    is_testing_mode = cfg.get("test_mode", False) or test_mode
+    eval_cfg = cfg.get("evaluation_params", {})
+    cv_splits = eval_cfg.get("cv_folds", 5)
+    seed = eval_cfg.get("global_seed", 42)
     
     final_data_path = dataset_cleaned_path if dataset_cleaned_path is not None else cfg["paths"]["dataset_cleaned"]
     if not os.path.exists(final_data_path):
@@ -302,8 +307,19 @@ def train_traditional_model(
         model_params.update(override_params)
 
     base_model_dir = cfg["paths"]["model_dir"]
-    model_dir = os.path.join(base_model_dir, "test") if cfg.get("test_mode", False) else base_model_dir
-    os.makedirs(model_dir, exist_ok=True)
+    run_type_dir = "testing" if is_testing_mode else "production"
+    run_dir = os.path.join(base_model_dir, run_type_dir)
+    diagnostics_dir = os.path.join(run_dir, "diagnostics")
+    os.makedirs(diagnostics_dir, exist_ok=True)
+
+    # clean up old .txt and .json files
+    old_txt_traces = glob.glob(os.path.join(diagnostics_dir, f"{engine_type}_tree_rules_*.txt"))
+    old_json_traces = glob.glob(os.path.join(diagnostics_dir, f"{engine_type}_tree_rules_*.json"))
+    for file_path in (old_txt_traces + old_json_traces):
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
 
     x_full = override_x_full if override_x_full is not None else cfg["features"]["x_full"]
     x_restricted = override_x_restricted if override_x_restricted is not None else cfg["features"]["x_restricted"]
@@ -316,7 +332,7 @@ def train_traditional_model(
 
     # Setup Validation
     print("\n" + "="*50)
-    print(f"INITIALIZING UNIFIED {model_name_label} PIPELINE")
+    print(f"INITIALIZING {model_name_label} PIPELINE")
     print("="*50)
     print(f"Dataset Path:     {final_data_path}")
     print(f"Dataset Shape:    {df_model.shape}")
@@ -326,7 +342,7 @@ def train_traditional_model(
     print(f"Model Parameters: {model_params}")
     print("="*50 + "\n")
 
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    kf = KFold(n_splits=cv_splits, shuffle=True, random_state=seed)
     metrics = {"full": {"r2": [], "mae_km": []},"restricted": {"r2": [], "mae_km": []},"delta": {"r2": []}}
     
     print(f"Running {model_name_label} Cross-Validation Evaluation...")
@@ -363,11 +379,13 @@ def train_traditional_model(
     full_composer = ColumnTransformer(transformers=[("keep", "passthrough", x_full)], remainder="drop")
     restricted_composer = ColumnTransformer(transformers=[("keep", "passthrough", x_restricted)], remainder="drop")
     
-    print(f"Running {model_name_label} production pipeline...")
     production_pipeline_full = Pipeline([("selector", full_composer),("regressor", ModelRegressor(**model_params))])
     production_pipeline_restricted = Pipeline([("selector", restricted_composer),("regressor", ModelRegressor(**model_params))])
-    
+
+    print(f"Running {model_name_label} production pipeline on full feature subset...")
     production_pipeline_full.fit(X, y)
+
+    print(f"Running {model_name_label} production pipeline on restricted feature subset...")
     production_pipeline_restricted.fit(X, y)
 
     mean_full_r2 = float(np.mean(metrics["full"]["r2"]))
@@ -386,7 +404,6 @@ def train_traditional_model(
     print(f"Full Model Mean MAE:      {mean_full_mae:.4f} km")
     print(f"Restricted Model Mean MAE:{mean_restricted_mae:.4f} km")
     print("="*50 + "\n")
-    print(f"Training final production {model_name_label} pipelines on full dataset...")
 
     if mean_delta_cv_r2 > 0:
         statistical_result = "Reject H0_stat: Group 2 features significantly improve out-of-sample R²."
@@ -402,18 +419,93 @@ def train_traditional_model(
         operational_result = f"Fail to Reject H0_ops: Group 2 feature improvement is > delta ({delta_threshold}). Restricted subset is insufficient."
         operational_outcome = "H0_ops"
 
+    full_model_path = os.path.join(run_dir, f"{engine_type}_full_model.pkl")
+    restricted_model_path = os.path.join(run_dir, f"{engine_type}_restricted_model.pkl")
+
     generated_uuid = str(uuid.uuid4())
     meta_args = (generated_uuid, engine_type, target_col, mean_delta_cv_r2, delta_threshold, statistical_outcome, operational_outcome)
 
     full_payload = _generate_metadata_payload(production_pipeline_full, x_full, "Full model with H.", metrics["full"], *meta_args)
     restricted_payload = _generate_metadata_payload(production_pipeline_restricted, x_restricted, "Restricted model without H.", metrics["restricted"], *meta_args)
 
-    full_model_path = os.path.join(model_dir, f"{engine_type}_full_model.pkl")
-    restricted_model_path = os.path.join(model_dir, f"{engine_type}_restricted_model.pkl")
+    full_model_path = os.path.join(run_dir, f"{engine_type}_full_model.pkl")
+    restricted_model_path = os.path.join(run_dir, f"{engine_type}_restricted_model.pkl")
     
     joblib.dump({"model": production_pipeline_full, "metadata": full_payload}, full_model_path)
     joblib.dump({"model": production_pipeline_restricted, "metadata": restricted_payload}, restricted_model_path)
-    print(f"Success! {model_name_label} production bundles saved safely (Old binaries overwritten).")
+    print(f"Success! {model_name_label} main bundles saved safely.")
+
+    models_to_unpack = [
+        ("full", production_pipeline_full, x_full),
+        ("restricted", production_pipeline_restricted, x_restricted)
+    ]
+
+    for subset_label, active_pipeline, active_features in models_to_unpack:
+        underlying_regressor = active_pipeline.named_steps["regressor"]
+        
+        if hasattr(underlying_regressor, "estimators_"):
+            raw_estimators = np.asarray(underlying_regressor.estimators_).ravel()
+
+            def serialize_tree_to_dict(dt_estimator, node_index=0):
+                tree_matrix = dt_estimator.tree_
+                
+                # Base Case: If the left child matches the right, it is a terminal leaf node
+                if tree_matrix.children_left[node_index] == tree_matrix.children_right[node_index]:
+                    return {
+                        "node_type": "leaf",
+                        "predicted_log_diameter_value": float(tree_matrix.value[node_index][0][0])
+                    }
+                
+                # Recursive Step: Track the binary conditional branch splits using the active features list
+                return {
+                    "node_type": "split",
+                    "split_feature": str(active_features[tree_matrix.feature[node_index]]),
+                    "split_threshold": float(tree_matrix.threshold[node_index]),
+                    "impurity_mse": float(tree_matrix.impurity[node_index]),
+                    "left_branch_if_less_equal": serialize_tree_to_dict(dt_estimator, int(tree_matrix.children_left[node_index])),
+                    "right_branch_if_greater": serialize_tree_to_dict(dt_estimator, int(tree_matrix.children_right[node_index]))
+                }
+
+            def serialize_tree_to_text(dt_estimator, node_index=0, depth=0):
+                tree_matrix = dt_estimator.tree_
+                indent = "|   " * depth
+                
+                # Base Case: It's a terminal leaf node
+                if tree_matrix.children_left[node_index] == tree_matrix.children_right[node_index]:
+                    val = float(tree_matrix.value[node_index][0][0])
+                    return f"{indent}|--- value: [{val:.4f}]\n"
+                
+                # Extract branch metrics using active feature boundaries
+                feat = active_features[tree_matrix.feature[node_index]]
+                thresh = float(tree_matrix.threshold[node_index])
+                
+                left_child = int(tree_matrix.children_left[node_index])
+                right_child = int(tree_matrix.children_right[node_index])
+                
+                # Recursively crawl left (<=) and right (>) paths
+                rules_str = f"{indent}|--- {feat} <= {thresh:.4f}\n"
+                rules_str += serialize_tree_to_text(dt_estimator, left_child, depth + 1)
+                
+                rules_str += f"{indent}|--- {feat} >  {thresh:.4f}\n"
+                rules_str += serialize_tree_to_text(dt_estimator, right_child, depth + 1)
+                
+                return rules_str
+                
+            print(f"Exporting raw rule maps for ALL {len(raw_estimators)} individual trees into {subset_label.upper()} spaces...")
+            for idx, tree_estimator in enumerate(raw_estimators):
+                # --- 1. EXPORT PURE PYTHON TEXT LAYOUT ---
+                tree_text_layout = serialize_tree_to_text(tree_estimator)
+                tree_txt_name = f"{engine_type}_{subset_label}_tree_rules_{idx:03d}.txt"
+                with open(os.path.join(diagnostics_dir, tree_txt_name), "w") as f_tree:
+                    f_tree.write(f"{model_name_label} ({subset_label.upper()}) Tree Index {idx} Decisions:\n" + "="*50 + "\n")
+                    f_tree.write(tree_text_layout)
+                
+                # --- 2. EXPORT PURE PYTHON JSON LAYOUT ---
+                tree_dictionary = serialize_tree_to_dict(tree_estimator)
+                tree_json_name = f"{engine_type}_{subset_label}_tree_rules_{idx:03d}.json"
+                with open(os.path.join(diagnostics_dir, tree_json_name), "w") as f_json:
+                    json.dump(tree_dictionary, f_json, indent=4)
+    print(f"Success! Flat rule structures (.txt and .json) for both Full and Restricted models updated safely inside: {diagnostics_dir}")
     
     print("\n" + "="*23 + f" HYPOTHESIS TESTING REPORT ({model_name_label}) " + "="*22)
     print(f"Testing against Operational Tolerance (δ) = {delta_threshold}")
@@ -459,7 +551,7 @@ def train_traditional_model(
         }
     }
 
-    _log_experiment_run(run_dict=output_payload, engine_name=engine_type, model_params=model_params, model_uuid=generated_uuid, cfg=cfg)
+    _log_experiment_run(run_dict=output_payload, engine_name=engine_type, model_params=model_params, model_uuid=generated_uuid, cfg=cfg,test_mode=is_testing_mode)
     return output_payload
 
 # ========================================================================================
@@ -630,10 +722,17 @@ def train_keras_model(
     override_x_full: List[str] = None,
     override_x_restricted: List[str] = None,
     delta_threshold: float = 0.05,
-    architecture_type: str = "wide_deep"
+    architecture_type: str = "wide_deep",
+    test_mode: bool = False
 ) -> dict:
     
     cfg = load_config(config_path)
+    is_testing_mode = cfg.get("test_mode", False) or test_mode
+    eval_cfg = cfg.get("evaluation_params", {})
+    cv_splits = eval_cfg.get("cv_folds", 5)
+    seed = eval_cfg.get("global_seed", 42)
+
+    
     final_data_path = dataset_cleaned_path if dataset_cleaned_path is not None else cfg["paths"]["dataset_cleaned"]
     if not os.path.exists(final_data_path):
         raise FileNotFoundError(f"Cleaned asteroid dataset not found at: '{final_data_path}'")
@@ -657,8 +756,9 @@ def train_keras_model(
     builder_overrides = {k: v for k, v in model_params.items() if k not in reserved_keys}
 
     base_model_dir = cfg["paths"]["model_dir"]
-    model_dir = os.path.join(base_model_dir, "test") if cfg.get("test_mode", False) else base_model_dir
-    os.makedirs(model_dir, exist_ok=True)
+    run_type_dir = "testing" if is_testing_mode else "production"
+    run_dir = os.path.join(base_model_dir, run_type_dir)
+    os.makedirs(run_dir, exist_ok=True)
 
     x_full = override_x_full if override_x_full is not None else cfg["features"]["x_full"]
     x_restricted = override_x_restricted if override_x_restricted is not None else cfg["features"]["x_restricted"]
@@ -666,7 +766,6 @@ def train_keras_model(
     
     df_raw = pd.read_csv(final_data_path)
     df_model = _engineer_tabular_interactions(df_raw)
-
     
     X_full_raw = df_model[x_full].astype(np.float32)
     X_rest_raw = df_model[x_restricted].astype(np.float32)
@@ -676,8 +775,15 @@ def train_keras_model(
     X_rest_numpy = X_rest_raw.values
 
     print("\n" + "="*50)
-    print(f"INITIALIZING UNIFIED {model_name_label} PIPELINE")
+    print(f"INITIALIZING {model_name_label} PIPELINE")
     print("="*50)
+    print(f"Dataset Path:     {final_data_path}")
+    print(f"Dataset Shape:    {df_model.shape}")
+    print(f"Full Features:    {x_full}")
+    print(f"Restrictive Features:  {x_restricted}")
+    print(f"Target Column:    {target_col}")
+    print(f"Model Parameters: {model_params}")
+    print("="*50 + "\n")
     
     if architecture_type == "wide_deep":
         builder_func = build_wide_and_deep
@@ -690,7 +796,7 @@ def train_keras_model(
     else:
         raise ValueError(f"Unknown Keras architecture type: {architecture_type}")
 
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    kf = KFold(n_splits=cv_splits, shuffle=True, random_state=seed)
     metrics = {"full": {"r2": [], "mae_km": []},"restricted": {"r2": [], "mae_km": []},"delta": {"r2": []}}
 
     optimal_epochs_f = []
@@ -702,11 +808,9 @@ def train_keras_model(
         X_train_f, X_test_f = X_full_numpy[train_idx], X_full_numpy[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
-        print("  -> Adapting normalization layer for full features...")
         norm_f = layers.Normalization(axis=-1)
         norm_f.adapt(X_train_f)
 
-        print("  -> Compiling full feature model architecture...")
         model_f = builder_func(
             input_dim=len(x_full), 
             config=cfg, 
@@ -721,23 +825,21 @@ def train_keras_model(
             restore_best_weights=model_params["restore_best_weights"]
         )
 
-        print(f"  -> Fitting Full Model (Max Epochs: {model_params['epochs']}, Batch Size: {model_params['batch_size']})...")
         history_f = model_f.fit(X_train_f, y_train, validation_split=cfg["data_params"].get("val_split", 0.1), epochs=model_params["epochs"], batch_size=model_params["batch_size"], callbacks=[early_stopping], verbose=1)
         
         stopped_epoch_f = len(history_f.history["loss"])
         best_epoch_f = max(1, stopped_epoch_f - model_params["patience"]) if early_stopping.stopped_epoch > 0 else stopped_epoch_f
         optimal_epochs_f.append(best_epoch_f)
 
-        print("  -> Full model training complete. Generating validation predictions...")
         preds_f = model_f.predict(X_test_f, verbose=0).ravel()
+        if is_testing_mode:
+            preds_f = np.clip(preds_f, -5.0, 6.0)
         
         X_train_r, X_test_r = X_rest_numpy[train_idx], X_rest_numpy[test_idx]
 
-        print("  -> Adapting normalization layer for restricted features...")
         norm_r = layers.Normalization(axis=-1)
         norm_r.adapt(X_train_r)
 
-        print("  -> Compiling restricted feature model architecture...")
         model_r = builder_func(
             input_dim=len(x_restricted), 
             config=cfg, 
@@ -746,15 +848,15 @@ def train_keras_model(
             **builder_overrides
         )
 
-        print(f"  -> Fitting Restricted Model...")
         history_r = model_r.fit(X_train_r, y_train, validation_split=cfg["data_params"].get("val_split", 0.1), epochs=model_params["epochs"], batch_size=model_params["batch_size"], callbacks=[early_stopping], verbose=1)
         
         stopped_epoch_r = len(history_r.history["loss"])
         best_epoch_r = max(1, stopped_epoch_r - model_params["patience"]) if early_stopping.stopped_epoch > 0 else stopped_epoch_r
         optimal_epochs_r.append(best_epoch_r)
         
-        print("  -> Restricted model training complete. Generating validation predictions...")
         preds_r = model_r.predict(X_test_r, verbose=0).ravel()
+        if is_testing_mode:
+            preds_r = np.clip(preds_r, -5.0, 6.0)
 
         f_r2 = r2_score(y_test, preds_f)
         r_r2 = r2_score(y_test, preds_r)
@@ -774,8 +876,6 @@ def train_keras_model(
     prod_epochs_f = _calculate_production_epochs(optimal_epochs_f, model_params["epochs"])
     prod_epochs_r = _calculate_production_epochs(optimal_epochs_r, model_params["epochs"])
     
-    print(f"  -> Optimal Cross-Validation Peaks (Full): {optimal_epochs_f}")
-    print(f"  -> Optimal Cross-Validation Peaks (Rest): {optimal_epochs_r}")
     print(f"  -> Production Hard Caps Locked At: {prod_epochs_f} epochs (Full) | {prod_epochs_r} epochs (Rest)")
 
     final_norm_f = layers.Normalization(axis=-1)
@@ -787,10 +887,10 @@ def train_keras_model(
     prod_model_full = builder_func(input_dim=len(x_full), config=cfg, norm_layer=final_norm_f, learning_rate=model_params["learning_rate"], **builder_overrides)
     prod_model_restricted = builder_func(input_dim=len(x_restricted), config=cfg, norm_layer=final_norm_r, learning_rate=model_params["learning_rate"], **builder_overrides)
 
-    print(f"\nTraining final production {model_name_label} models on full dataset...")
+    print(f"\nTraining final production {model_name_label} models on full feature dataset...")
     prod_model_full.fit(X_full_raw.values, y, epochs=prod_epochs_f, batch_size=model_params["batch_size"], verbose=1)
     
-    print(f"\nTraining final production {model_name_label} models on restricted dataset...")
+    print(f"\nTraining final production {model_name_label} models on restricted feature dataset...")
     prod_model_restricted.fit(X_rest_raw.values, y, epochs=prod_epochs_r, batch_size=model_params["batch_size"], verbose=1)
     
     mean_full_r2 = float(np.mean(metrics["full"]["r2"]))
@@ -798,12 +898,30 @@ def train_keras_model(
     mean_delta_cv_r2 = float(mean_full_r2 - mean_restricted_r2)
     mean_full_mae = float(np.mean(metrics["full"]["mae_km"]))
     mean_restricted_mae = float(np.mean(metrics["restricted"]["mae_km"]))
+
+    print("\n" + "="*50)
+    print(f"CROSS-VALIDATION SUMMARY AVERAGES ({architecture_type.upper()})")
+    print("="*50)
+    print(f"Full Model Mean R²:       {mean_full_r2:.4f}")
+    print(f"Restricted Model Mean R²: {mean_restricted_r2:.4f}")
+    print(f"Mean Δ R² (Drop Impact):  {mean_delta_cv_r2:.4f} (± {float(np.std(metrics['delta']['r2'])):.4f})")
+    print(f"Full Model Mean MAE:      {mean_full_mae:.4f} km")
+    print(f"Restricted Model Mean MAE:{mean_restricted_mae:.4f} km")
+    print("="*50 + "\n")
     
     statistical_outcome = "H1_stat" if mean_delta_cv_r2 > 0 else "H0_stat"
     statistical_result = "Reject H0_stat: Group 2 features significantly improve out-of-sample R²." if mean_delta_cv_r2 > 0 else "Fail to Reject H0_stat: Group 2 features do not improve out-of-sample R²."
     
     operational_outcome = "H1_ops" if mean_delta_cv_r2 <= delta_threshold else "H0_ops"
     operational_result = f"Reject H0_ops: Group 2 feature improvement is ≤ delta ({delta_threshold}). Restricted subset is operationally sufficient." if mean_delta_cv_r2 <= delta_threshold else f"Fail to Reject H0_ops: Group 2 feature improvement is > delta ({delta_threshold}). Restricted subset is insufficient."
+
+    print("\n" + "="*23 + f" HYPOTHESIS TESTING REPORT ({architecture_type.upper()}) " + "="*22)
+    print(f"Testing against Operational Tolerance (δ) = {delta_threshold:.4f}")
+    print(f"Calculated Delta R² (Drop Impact):        = {mean_delta_cv_r2:.4f}")
+    print("-" * 72)
+    print(f"Statistical Test: [{statistical_outcome}] -> {statistical_result}")
+    print(f"Operational Test: [{operational_outcome}] -> {operational_result}")
+    print("=" * 72 + "\n")
     
     generated_uuid = str(uuid.uuid4())
     class MockPipeline:
@@ -819,13 +937,13 @@ def train_keras_model(
     full_payload = _generate_metadata_payload(mock_pipe_f, x_full, f"Full {architecture_type} network.", metrics["full"], *meta_args)
     restricted_payload = _generate_metadata_payload(mock_pipe_r, x_restricted, f"Restricted {architecture_type} network.", metrics["restricted"], *meta_args)
     
-    full_model_path = os.path.join(model_dir, f"{engine_type}_full_model.keras")
-    restricted_model_path = os.path.join(model_dir, f"{engine_type}_restricted_model.keras")
-    
+    full_model_path = os.path.join(run_dir, f"{engine_type}_full_model.keras")
+    restricted_model_path = os.path.join(run_dir, f"{engine_type}_restricted_model.keras")
+
     prod_model_full.save(full_model_path)
     prod_model_restricted.save(restricted_model_path)
+    print(f"Success! Keras models production bundles saved safely to: {run_dir}")
     
-    print(f"Success! Native Keras models saved directly to disk.")
     output_payload = {
         "status": "success",
         "model_uuid": generated_uuid,
@@ -853,5 +971,5 @@ def train_keras_model(
         }
     }
     
-    _log_experiment_run(run_dict=output_payload, engine_name=engine_type, model_params=model_params, model_uuid=generated_uuid, cfg=cfg)
+    _log_experiment_run(run_dict=output_payload, engine_name=engine_type, model_params=model_params, model_uuid=generated_uuid, cfg=cfg, test_mode=is_testing_mode)
     return output_payload
