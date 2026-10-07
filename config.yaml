@@ -1,8 +1,10 @@
+test_mode: false
 paths:
   dataset: "data/dataset-jpl-small-body-asteroids.csv"
   dataset_cleaned: "data/cleaned-dataset-jpl-small-body-asteroids.csv"
   model_dir: "models"
   experiment_log: "results/model_experiment_log.csv"
+  experiment_folds_log: "results/model_experiment_folds_log.csv"
 
 features:
   x_restricted:

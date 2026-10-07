@@ -25,7 +25,22 @@ def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
-def generate_metadata_payload(
+def _engineer_tabular_interactions(df: pd.DataFrame) -> pd.DataFrame:
+    df_out = df.copy()
+    if "H" in df_out.columns:
+        df_out["H_squared"] = df_out["H"] ** 2
+        df_out["brightness_raw"] = 10 ** (-0.4 * df_out["H"])
+    if all(col in df_out.columns for col in ["a", "e", "i"]):
+        df_out["orbit_volume"] = df_out["a"] * df_out["e"] * df_out["i"]
+    return df_out
+
+def _calculate_production_epochs(optimal_epochs: list, max_epochs_ceiling: int) -> int:
+    if not optimal_epochs:
+        return max_epochs_ceiling
+    calculated_avg = int(np.ceil(np.mean(optimal_epochs) * 1.10))
+    return min(calculated_avg, max_epochs_ceiling)
+
+def _generate_metadata_payload(
     fitted_pipeline: Pipeline, 
     feature_names: List[str], 
     description: str, 
@@ -84,44 +99,63 @@ def generate_metadata_payload(
         }
     }
 
-def _log_experiment_run(run_dict: dict, engine_name: str, model_params: dict, model_uuid: str, cfg: dict,):
-    csv_path = cfg["paths"]["experiment_log"]
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
+def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg):
+    is_test_mode = cfg.get("test_mode", False) or (model_params and model_params.get("test_mode", False))
+    master_log_path = cfg["paths"]["experiment_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_log"]
+    folds_log_path = cfg["paths"]["experiment_folds_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_folds_log"]
+    timestamp_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    headers = [
-        "timestamp", "model_uuid", "engine_type", "delta_threshold", "calculated_delta_r2",
-        "statistical_outcome", "operational_outcome", "full_mean_cv_r2", 
-        "restricted_mean_cv_r2", "delta_std_cv_r2", "full_mean_cv_mae_km", 
-        "restricted_mean_cv_mae_km", "model_parameters"
-    ]
-    
-    summary = run_dict["summary_averages"]
-    hypotheses = run_dict["hypothesis_results"]
-    
-    row_data = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    master_entry = {
+        "timestamp": timestamp_str,
         "model_uuid": model_uuid,
-        "engine_type": engine_name.upper(),
-        "delta_threshold": hypotheses["delta_threshold_used"],
-        "calculated_delta_r2": hypotheses["calculated_delta_r2"],
-        "statistical_outcome": hypotheses["statistical"]["outcome"],
-        "operational_outcome": hypotheses["operational"]["outcome"],
-        "full_mean_cv_r2": summary["full_mean_cv_r2"],
-        "restricted_mean_cv_r2": summary["restricted_mean_cv_r2"],
-        "delta_std_cv_r2": summary["delta_std_cv_r2"],
-        "full_mean_cv_mae_km": summary["full_mean_cv_mae_km"],
-        "restricted_mean_cv_mae_km": summary["restricted_mean_cv_mae_km"],
-        "model_parameters": json.dumps(model_params)
+        "engine_name": engine_name,
+        "batch_size": model_params.get("batch_size", "N/A"),
+        "learning_rate": model_params.get("learning_rate", "N/A"),
+        "epochs": model_params.get("epochs", "N/A"),
+        "full_mean_cv_r2": run_dict["summary_averages"]["full_mean_cv_r2"],
+        "restricted_mean_cv_r2": run_dict["summary_averages"]["restricted_mean_cv_r2"],
+        "calculated_delta_r2": run_dict["hypothesis_results"]["calculated_delta_r2"],
+        "full_mean_cv_mae_km": run_dict["summary_averages"]["full_mean_cv_mae_km"],
+        "restricted_mean_cv_mae_km": run_dict["summary_averages"]["restricted_mean_cv_mae_km"],
+        "statistical_conclusion": run_dict["hypothesis_results"]["statistical"]["conclusion"],
+        "operational_conclusion": run_dict["hypothesis_results"]["operational"]["conclusion"]
     }
     
-    file_exists = os.path.exists(csv_path)
-    with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row_data)
+    df_master = pd.DataFrame([master_entry])
+    master_header = not os.path.exists(master_log_path)
+    df_master.to_csv(master_log_path, mode="a", index=False, header=master_header)
+    
+    raw_folds = run_dict.get("raw_folds", {})
+    fold_ids = raw_folds.get("fold_ids", [])
+    
+    if fold_ids:
+        fold_records = []
+        full_r2 = raw_folds.get("full_r2_per_fold", [])
+        rest_r2 = raw_folds.get("restricted_r2_per_fold", [])
+        delta_r2 = raw_folds.get("delta_r2_per_fold", [])
+        full_mae = raw_folds.get("full_mae_km_per_fold", [])
+        rest_mae = raw_folds.get("restricted_mae_km_per_fold", [])
         
-    print(f"History logged automatically under [{engine_name.upper()}] with UUID: {model_uuid}")
+        for i in range(len(fold_ids)):
+            fold_records.append({
+                "timestamp": timestamp_str,
+                "model_uuid": model_uuid,
+                "engine_name": engine_name.upper(),
+                "fold_id": fold_ids[i],
+                "full_model_r2": full_r2[i] if i < len(full_r2) else None,
+                "restricted_model_r2": rest_r2[i] if i < len(rest_r2) else None,
+                "delta_r2": delta_r2[i] if i < len(delta_r2) else None,
+                "full_model_mae_km": full_mae[i] if i < len(full_mae) else None,
+                "restricted_model_mae_km": rest_mae[i] if i < len(rest_mae) else None
+            })
+            
+        df_folds = pd.DataFrame(fold_records)
+        folds_header = not os.path.exists(folds_log_path)
+        df_folds.to_csv(folds_log_path, mode="a", index=False, header=folds_header)
+        
+    print(f"Success! Master metrics appended to: {master_log_path}")
+    print(f"Success! Cross-validation arrays appended to: {folds_log_path}")
 
 def train_model(
     engine_type: str = "rf",
@@ -203,9 +237,6 @@ def predict_model(input_data: Union[dict, pd.DataFrame], engine_type: str = "rf"
         target_col = cfg["features"]["target_col"]
         log_prediction = preds_df[f"{target_col}_prediction"].values.ravel()
 
-    # ====================================================================================
-    # NATIVE DEEP LEARNING INFERENCE (KERAS ENGINES)
-    # ====================================================================================
     elif engine_type.startswith("keras_"):
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.keras")
         if not os.path.exists(model_path):
@@ -215,9 +246,6 @@ def predict_model(input_data: Union[dict, pd.DataFrame], engine_type: str = "rf"
         X_matrix = df_input[cfg["features"][feature_key]].astype(np.float32).values
         log_prediction = model.predict(X_matrix, verbose=0).ravel()
         
-    # ====================================================================================
-    # TRADITIONAL MACHINE LEARNING INFERENCE (SCIKIT-LEARN BUNDLES)
-    # ====================================================================================
     else:
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.pkl")
         if not os.path.exists(model_path) and f"{model_type_clean}_model" in cfg["paths"]:
@@ -272,8 +300,9 @@ def train_traditional_model(
     model_params = cfg["model_params"][param_key].copy()
     if override_params is not None:
         model_params.update(override_params)
-    
-    model_dir = cfg["paths"]["model_dir"]
+
+    base_model_dir = cfg["paths"]["model_dir"]
+    model_dir = os.path.join(base_model_dir, "test") if cfg.get("test_mode", False) else base_model_dir
     os.makedirs(model_dir, exist_ok=True)
 
     x_full = override_x_full if override_x_full is not None else cfg["features"]["x_full"]
@@ -376,8 +405,8 @@ def train_traditional_model(
     generated_uuid = str(uuid.uuid4())
     meta_args = (generated_uuid, engine_type, target_col, mean_delta_cv_r2, delta_threshold, statistical_outcome, operational_outcome)
 
-    full_payload = generate_metadata_payload(production_pipeline_full, x_full, "Full model with H.", metrics["full"], *meta_args)
-    restricted_payload = generate_metadata_payload(production_pipeline_restricted, x_restricted, "Restricted model without H.", metrics["restricted"], *meta_args)
+    full_payload = _generate_metadata_payload(production_pipeline_full, x_full, "Full model with H.", metrics["full"], *meta_args)
+    restricted_payload = _generate_metadata_payload(production_pipeline_restricted, x_restricted, "Restricted model without H.", metrics["restricted"], *meta_args)
 
     full_model_path = os.path.join(model_dir, f"{engine_type}_full_model.pkl")
     restricted_model_path = os.path.join(model_dir, f"{engine_type}_restricted_model.pkl")
@@ -560,7 +589,6 @@ def build_keras_ft_transformer(input_dim, config, norm_layer=None, learning_rate
     return model
 
 def build_keras_gated_resnet(input_dim, config, norm_layer=None, learning_rate=0.001, **kwargs):
-
     res_cfg = config.get("model_params", {}).get("keras_nn", {}).get("tabular_resnet", {})
     hidden_dim = kwargs.get("hidden_dim", res_cfg.get("hidden_dim", 256))
     num_blocks = kwargs.get("num_blocks", res_cfg.get("num_blocks", 3))
@@ -602,7 +630,7 @@ def train_keras_model(
     override_x_full: List[str] = None,
     override_x_restricted: List[str] = None,
     delta_threshold: float = 0.05,
-    architecture_type: str = "wide_deep"  # "wide_deep" or "resnet"
+    architecture_type: str = "wide_deep"
 ) -> dict:
     
     cfg = load_config(config_path)
@@ -624,20 +652,21 @@ def train_keras_model(
         "restore_best_weights": train_cfg.get("early_stopping", {}).get("restore_best_weights", True)
     }
     
-    if override_params is not None:
-        model_params.update(override_params)
-
+    if override_params is not None: model_params.update(override_params)
     reserved_keys = ["epochs", "batch_size", "learning_rate", "patience", "restore_best_weights"]
     builder_overrides = {k: v for k, v in model_params.items() if k not in reserved_keys}
-    
-    model_dir = cfg["paths"]["model_dir"]
+
+    base_model_dir = cfg["paths"]["model_dir"]
+    model_dir = os.path.join(base_model_dir, "test") if cfg.get("test_mode", False) else base_model_dir
     os.makedirs(model_dir, exist_ok=True)
 
     x_full = override_x_full if override_x_full is not None else cfg["features"]["x_full"]
     x_restricted = override_x_restricted if override_x_restricted is not None else cfg["features"]["x_restricted"]
     target_col = cfg["features"]["target_col"]
     
-    df_model = pd.read_csv(final_data_path)
+    df_raw = pd.read_csv(final_data_path)
+    df_model = _engineer_tabular_interactions(df_raw)
+
     
     X_full_raw = df_model[x_full].astype(np.float32)
     X_rest_raw = df_model[x_restricted].astype(np.float32)
@@ -742,8 +771,8 @@ def train_keras_model(
     prod_epochs_f = int(np.ceil(np.mean(optimal_epochs_f) * 1.10))
     prod_epochs_r = int(np.ceil(np.mean(optimal_epochs_r) * 1.10))
     
-    prod_epochs_f = min(prod_epochs_f, model_params["epochs"])
-    prod_epochs_r = min(prod_epochs_r, model_params["epochs"])
+    prod_epochs_f = _calculate_production_epochs(optimal_epochs_f, model_params["epochs"])
+    prod_epochs_r = _calculate_production_epochs(optimal_epochs_r, model_params["epochs"])
     
     print(f"  -> Optimal Cross-Validation Peaks (Full): {optimal_epochs_f}")
     print(f"  -> Optimal Cross-Validation Peaks (Rest): {optimal_epochs_r}")
@@ -787,8 +816,8 @@ def train_keras_model(
     delta_threshold = float(delta_threshold)
     meta_args = (generated_uuid, engine_type, target_col, model_params, mean_delta_cv_r2, delta_threshold, statistical_outcome, operational_outcome)
     
-    full_payload = generate_metadata_payload(mock_pipe_f, x_full, f"Full {architecture_type} network.", metrics["full"], *meta_args)
-    restricted_payload = generate_metadata_payload(mock_pipe_r, x_restricted, f"Restricted {architecture_type} network.", metrics["restricted"], *meta_args)
+    full_payload = _generate_metadata_payload(mock_pipe_f, x_full, f"Full {architecture_type} network.", metrics["full"], *meta_args)
+    restricted_payload = _generate_metadata_payload(mock_pipe_r, x_restricted, f"Restricted {architecture_type} network.", metrics["restricted"], *meta_args)
     
     full_model_path = os.path.join(model_dir, f"{engine_type}_full_model.keras")
     restricted_model_path = os.path.join(model_dir, f"{engine_type}_restricted_model.keras")
