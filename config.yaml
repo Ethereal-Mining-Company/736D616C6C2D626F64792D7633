@@ -17,6 +17,12 @@ features:
   target: "diameter"
   target_col: "diameter_log"
 
+data_params:
+  val_split: 0.15
+  test_split: 0.15
+  scale_features: true
+  scale_target: false
+
 model_params:
   rf_params:
     n_estimators: 150
@@ -30,3 +36,28 @@ model_params:
     learning_rate: 0.05
     min_samples_leaf: 2
     random_state: 42
+  keras_nn:
+    activation: "relu"
+    learning_rate: 0.001
+    loss: "mse"
+    metrics: ["mae"]
+    wide_and_deep:
+      wide_dim: 1
+      deep_dims: [128, 64]
+      dropout_rate: 0.2
+    tabular_resnet:
+      hidden_dim: 128
+      num_blocks: 2
+      dropout_rate: 0.2
+    ft_transformer:
+      num_heads: 4
+      num_attn_blocks: 3
+      embedding_dim: 32
+      dropout_rate: 0.1
+
+training_params:
+  batch_size: 64
+  epochs: 100
+  early_stopping:
+    patience: 10
+    restore_best_weights: true
