@@ -100,6 +100,8 @@ def _generate_metadata_payload(
     }
 
 def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg, test_mode: bool = False):
+    import json
+    
     is_test_mode = cfg.get("test_mode", False) or test_mode
     main_log_path = cfg["paths"]["experiment_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_log"]
     folds_log_path = cfg["paths"]["experiment_folds_log"].replace(".csv", "_test.csv") if is_test_mode else cfg["paths"]["experiment_folds_log"]
@@ -107,19 +109,42 @@ def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg, te
     timestamp_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     params_string_lump = str(model_params)
 
+    # Convert features to strict stringified JSON lists to preserve arrays inside single CSV cells safely
+    features_full_array = json.dumps(cfg["features"]["x_full"])
+    features_restricted_array = json.dumps(cfg["features"]["x_restricted"])
+
+    # 1. Expand the main aggregate model ledger row
     main_entry = {
         "timestamp": timestamp_str,
         "model_uuid": model_uuid,
         "engine_name": engine_name,
+        
+        # --- TARGET & FEATURE METADATA ARRAYS ---
+        "target_col": cfg["features"]["target_col"],
+        "target_raw_name": cfg["features"].get("target", "diameter"),
+        "features_full_subset": features_full_array,
+        "features_restricted_subset": features_restricted_array,
+        
+        # --- RAW SOURCE DATA METRICS ---
+        "source_total_rows": run_dict.get("dataset_metrics", {}).get("total_rows"),
+        "source_feature_count": run_dict.get("dataset_metrics", {}).get("feature_count"),
+        "source_min_diameter_km": run_dict.get("dataset_metrics", {}).get("min_diameter_km"),
+        "source_max_diameter_km": run_dict.get("dataset_metrics", {}).get("max_diameter_km"),
+        
+        # --- CROSS-VALIDATION AVERAGES ---
         "full_mean_cv_r2": run_dict["summary_averages"]["full_mean_cv_r2"],
         "restricted_mean_cv_r2": run_dict["summary_averages"]["restricted_mean_cv_r2"],
+        "delta_threshold": run_dict["hypothesis_results"]["delta_threshold_used"],
         "calculated_delta_r2": run_dict["hypothesis_results"]["calculated_delta_r2"],
         "full_mean_cv_mae_km": run_dict["summary_averages"]["full_mean_cv_mae_km"],
         "restricted_mean_cv_mae_km": run_dict["summary_averages"]["restricted_mean_cv_mae_km"],
+        
+        # --- RECONCILIATION CONCLUSIONS ---
         "statistical_conclusion": run_dict["hypothesis_results"]["statistical"]["conclusion"],
         "operational_conclusion": run_dict["hypothesis_results"]["operational"]["conclusion"],
-        "model_parameters": params_string_lump  # Placed explicitly as the final terminal column field
+        "model_parameters": params_string_lump
     }
+    
     df_main = pd.DataFrame([main_entry])
     main_header = not os.path.exists(main_log_path)
     df_main.to_csv(main_log_path, mode="a", index=False, header=main_header)
@@ -138,6 +163,16 @@ def _log_experiment_run(run_dict, engine_name, model_params, model_uuid, cfg, te
                 "model_uuid": model_uuid,
                 "engine_name": engine_name.upper(),
                 "fold_id": fold_ids[i],
+                
+                # --- MATCHING SCHEMAS & SOURCE DATA ARRAYS PER SPLIT ---
+                "target_col": cfg["features"]["target_col"],
+                "target_raw_name": cfg["features"].get("target", "diameter"),
+                "features_full_subset": features_full_array,
+                "features_restricted_subset": features_restricted_array,
+                "source_total_rows": run_dict.get("dataset_metrics", {}).get("total_rows"),
+                "delta_threshold": run_dict["hypothesis_results"]["delta_threshold_used"],
+                
+                # --- OUT-OF-SAMPLE CROSS-VALIDATION SPLIT METRICS ---
                 "full_model_r2": full_r2[i] if i < len(full_r2) else None,
                 "restricted_model_r2": rest_r2[i] if i < len(rest_r2) else None,
                 "delta_r2": delta_r2[i] if i < len(delta_r2) else None,
@@ -518,21 +553,20 @@ def train_traditional_model(
     output_payload = {
         "status": "success",
         "model_uuid": generated_uuid,
-        "model_paths": {
-            "full_model": full_model_path,
-            "restricted_model": restricted_model_path
+        
+        "dataset_metrics": {
+            "total_rows": int(df_model.shape[0] if hasattr(df_model, 'shape') else len(df_model)),
+            "feature_count": int(len(x_full)),
+            "min_diameter_km": float(10 ** np.min(y)),
+            "max_diameter_km": float(10 ** np.max(y))
         },
+        
+        "model_paths": {"full_model": full_model_path, "restricted_model": restricted_model_path},
         "hypothesis_results": {
             "delta_threshold_used": delta_threshold,
             "calculated_delta_r2": mean_delta_cv_r2,
-            "statistical": {
-                "outcome": statistical_outcome,
-                "conclusion": statistical_result
-            },
-            "operational": {
-                "outcome": operational_outcome,
-                "conclusion": operational_result
-            }
+            "statistical": {"outcome": statistical_outcome, "conclusion": statistical_result},
+            "operational": {"outcome": operational_outcome, "conclusion": operational_result}
         },
         "summary_averages": {
             "full_mean_cv_r2": mean_full_r2, 
@@ -947,7 +981,18 @@ def train_keras_model(
     output_payload = {
         "status": "success",
         "model_uuid": generated_uuid,
-        "model_paths": {"full_model": full_model_path, "restricted_model": restricted_model_path},
+        
+        "dataset_metrics": {
+            "total_rows": int(df_model.shape[0] if hasattr(df_model, 'shape') else len(df_model)),
+            "feature_count": int(len(x_full)),
+            "min_diameter_km": float(10 ** np.min(y)),
+            "max_diameter_km": float(10 ** np.max(y))
+        },
+        
+        "model_paths": {
+            "full_model": full_model_path, 
+            "restricted_model": restricted_model_path
+        },
         "hypothesis_results": {
             "delta_threshold_used": delta_threshold,
             "calculated_delta_r2": mean_delta_cv_r2,
@@ -955,10 +1000,10 @@ def train_keras_model(
             "operational": {"outcome": operational_outcome, "conclusion": operational_result}
         },
         "summary_averages": {
-            "full_mean_cv_r2": mean_full_r2,
+            "full_mean_cv_r2": mean_full_r2, 
             "restricted_mean_cv_r2": mean_restricted_r2,
             "delta_std_cv_r2": float(np.std(metrics["delta"]["r2"])),
-            "full_mean_cv_mae_km": mean_full_mae,
+            "full_mean_cv_mae_km": mean_full_mae, 
             "restricted_mean_cv_mae_km": mean_restricted_mae
         },
         "raw_folds": {

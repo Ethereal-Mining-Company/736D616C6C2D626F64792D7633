@@ -226,3 +226,5 @@ __pycache__/
 **/*_test.*
 *_test.csv
 logs/*_test.csv
+*DNU_*
+**/*DNU_*
