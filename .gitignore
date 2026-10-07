@@ -223,3 +223,6 @@ __pycache__/
 *.pyc
 **/testing/
 **/diagnostics/
+**/*_test.*
+*_test.csv
+logs/*_test.csv
