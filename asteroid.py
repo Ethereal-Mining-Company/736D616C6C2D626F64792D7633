@@ -6,6 +6,7 @@ import csv
 import json
 import uuid
 import glob
+import hashlib
 from datetime import datetime
 import yaml
 import joblib
@@ -30,9 +31,9 @@ def _engineer_tabular_interactions(df: pd.DataFrame) -> pd.DataFrame:
     df_out = df.copy()
     if "H" in df_out.columns:
         df_out["H_squared"] = df_out["H"] ** 2
-        df_out["brightness_raw"] = 10 ** (-0.4 * df_out["H"])
+        df_out["brightness_log_scale"] = 10 ** (-0.2 * df_out["H"])
     if all(col in df_out.columns for col in ["a", "e", "i"]):
-        df_out["orbit_volume"] = df_out["a"] * df_out["e"] * df_out["i"]
+        df_out["orbit_log_volume"] = np.log1p(df_out["a"] * df_out["e"] * df_out["i"])
     return df_out
 
 def _calculate_production_epochs(optimal_epochs: list, max_epochs_ceiling: int) -> int:
@@ -240,13 +241,51 @@ def train_model(
             f"Allowed values are: ['rf', 'xgboost', 'keras_wide_deep', 'keras_resnet', 'ft_transformer']"
         )
 
-def predict_model(
-    input_data: Union[dict, pd.DataFrame], 
-    engine_type: str = "rf", 
-    model_type: str = "full", 
-    config_path: str = "config.yaml",
-    test_mode: bool = False
-) -> Union[float, List[float], dict]:
+import os
+import uuid
+import hashlib
+import joblib
+import numpy as np
+import pandas as pd
+from typing import Union, List
+import keras
+
+def _log_predictions_to_csv(df_input: pd.DataFrame, predictions: np.ndarray, engine_name: str, model_type: str, cfg: dict, is_test: bool, actual_uuid: str = None) -> None:
+    df_input = df_input.reset_index(drop=True)
+    required_cols = ["spkid", "Asteroid", "Actual Diameter (km)"]
+    for col in required_cols:
+        if col not in df_input.columns:
+            df_input[col] = np.nan if col != "Asteroid" else "Unknown"
+
+    feature_key = "x_full" if model_type == "full" else "x_restricted"
+    features_used = cfg.get("features", {}).get(feature_key, [])
+    dataset_version = hashlib.md5("".join(sorted(features_used)).encode()).hexdigest()[:8]
+    model_uuid = actual_uuid if actual_uuid else f"{engine_name}_{model_type}_{uuid.uuid4().hex[:8]}"
+
+    actual_dia = df_input["Actual Diameter (km)"]
+    error_pct = np.where(actual_dia > 0, (np.abs(actual_dia - predictions) / actual_dia) * 100, np.nan)
+
+    df_log = pd.DataFrame({
+        "spkid": df_input["spkid"],
+        "Asteroid": df_input["Asteroid"],
+        "Engine": engine_name,
+        "Model_UUID": model_uuid,
+        "Dataset_Version": dataset_version,
+        "Subset": model_type,
+        "Features_Used": "|".join(features_used),
+        "Actual Diameter (km)": actual_dia,
+        "Pred (km)": predictions,
+        "Error %": error_pct
+    })
+
+    os.makedirs("logs", exist_ok=True)
+    suffix = "_test.csv" if is_test else ".csv"
+    full_path = os.path.join("logs", f"prediction_results{suffix}")
+
+    file_exists = os.path.isfile(full_path)
+    df_log.to_csv(full_path, mode="a", header=not file_exists, index=False)
+
+def predict_model(input_data: Union[dict, pd.DataFrame], engine_type: str = "rf", model_type: str = "full", config_path: str = "config.yaml", test_mode: bool = False) -> Union[float, List[float], dict]:
     cfg = load_config(config_path)
     is_testing_mode = cfg.get("test_mode", False) or test_mode
     engine_type, model_type_clean = engine_type.lower(), model_type.lower()
@@ -273,6 +312,7 @@ def predict_model(
     if engine_type in ["ft_transformer", "ft_t", "transformer"]:
         engine_type = "keras_ft_transformer"
         
+    extracted_uuid = None
     if engine_type.startswith("keras_"):
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.keras")
         if not os.path.exists(model_path):
@@ -281,6 +321,8 @@ def predict_model(
         feature_key = "x_full" if model_type_clean == "full" else "x_restricted"
         X_matrix = df_input[cfg["features"][feature_key]].astype(np.float32).values
         log_prediction = model.predict(X_matrix, verbose=0).ravel()
+        try: extracted_uuid = hashlib.md5(str(model.to_json()).encode()).hexdigest()[:12]
+        except: pass
     else:
         model_path = os.path.join(model_dir, f"{engine_type}_{model_type_clean}_model.pkl")
         if not os.path.exists(model_path) and f"{model_type_clean}_model" in cfg["paths"]:
@@ -289,6 +331,9 @@ def predict_model(
             raise FileNotFoundError(f"Production model binary missing at '{model_path}'.")
         artifacts = joblib.load(model_path)
         pipeline, metadata = artifacts["model"], artifacts["metadata"]
+        extracted_uuid = metadata.get("model_metadata", {}).get("model_uuid", None)
+        if not extracted_uuid:
+            extracted_uuid = metadata.get("model_uuid", None)
         active_binary_engine = metadata["model_metadata"].get("engine_type", engine_type).lower()
         requested_norm = "xgboost" if engine_type in ["xgboost", "xgb", "gradient"] else "rf"
         binary_norm = "xgboost" if active_binary_engine in ["xgboost", "xgb", "gradient"] else "rf"
@@ -297,6 +342,8 @@ def predict_model(
         log_prediction = pipeline.predict(df_input)
 
     diameter_km = 10 ** log_prediction
+    _log_predictions_to_csv(df_input, diameter_km, engine_type, model_type_clean, cfg, is_testing_mode, actual_uuid=extracted_uuid)
+
     if isinstance(input_data, dict):
         return diameter_km.item() if isinstance(diameter_km, np.ndarray) else float(diameter_km)
     return diameter_km.tolist()
@@ -974,8 +1021,8 @@ def train_keras_model(
     full_model_path = os.path.join(run_dir, f"{engine_type}_full_model.keras")
     restricted_model_path = os.path.join(run_dir, f"{engine_type}_restricted_model.keras")
 
-    prod_model_full.save(full_model_path)
-    prod_model_restricted.save(restricted_model_path)
+    prod_model_full.save(full_model_path, metadata=full_payload)
+    prod_model_restricted.save(restricted_model_path, metadata=restricted_payload)
     print(f"Success! Keras models production bundles saved safely to: {run_dir}")
     
     output_payload = {
