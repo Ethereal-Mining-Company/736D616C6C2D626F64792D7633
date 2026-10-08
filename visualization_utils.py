@@ -8,7 +8,12 @@ from sklearn.metrics import r2_score
 
 class BaseDashboard:
     def __init__(self, df_summary, is_test_run=False):
-        self.df_summary = df_summary
+        self.df_summary = df_summary.copy()
+        actual_candidates = ['Actual Diameter (km)', 'actual', 'Actual', 'Actual Size']
+        for col in actual_candidates:
+            if col in self.df_summary.columns and col != 'Actual Diameter (km)':
+                self.df_summary = self.df_summary.rename(columns={col: 'Actual Diameter (km)'})
+                break
         self.is_test_run = is_test_run
         self.colors = {'Actual': '#000000', 'Actual Size': '#000000'}
 
@@ -34,7 +39,7 @@ class GroupedBarChart(BaseDashboard):
         fig = go.Figure()
         sorted_df = self.df_summary.sort_values(by='Actual Diameter (km)', ascending=False)
         unique_asteroids = sorted_df['Asteroid'].unique()
-        actual_sizes = [sorted_df[sorted_df['Asteroid'] == a]['Actual Diameter (km)'].values for a in unique_asteroids if len(sorted_df[sorted_df['Asteroid'] == a]) > 0]
+        actual_sizes = [sorted_df[sorted_df['Asteroid'] == a]['Actual Diameter (km)'].values[0] for a in unique_asteroids if len(sorted_df[sorted_df['Asteroid'] == a]) > 0]
         
         fig.add_trace(go.Bar(y=unique_asteroids, x=actual_sizes, name='Actual Size', orientation='h', marker=dict(color=self.colors.get('Actual'))))
         for eng in sorted(sorted_df['Engine'].unique()):
@@ -63,7 +68,7 @@ class ConnectionLinePlot(BaseDashboard):
                     fig.add_trace(go.Scatter(x=[ast, ast], y=[act_val, pred_val], mode='lines', line=dict(color='#000000', width=1.5), showlegend=False, hoverinfo='skip'))
 
         unique_asteroids = sorted(self.df_summary['Asteroid'].unique())
-        actual_sizes = [self.df_summary[self.df_summary['Asteroid'] == a]['Actual Diameter (km)'].values for a in unique_asteroids]
+        actual_sizes = [self.df_summary[self.df_summary['Asteroid'] == a]['Actual Diameter (km)'].values[0] for a in unique_asteroids]
         fig.add_trace(go.Scatter(x=unique_asteroids, y=actual_sizes, name='Actual Size', mode='markers', marker=dict(size=11, color=self.colors.get('Actual'), symbol='circle')))
         for eng in sorted(self.df_summary['Engine'].unique()):
             sub = self.df_summary[self.df_summary['Engine'] == eng]
@@ -83,17 +88,13 @@ class EvaluationScatterPlot(BaseDashboard):
         fig = go.Figure()
         for eng in sorted(self.df_summary['Engine'].unique()):
             sub = self.df_summary[self.df_summary['Engine'] == eng]
-            fig.add_trace(go.Scatter(x=sub['Actual Diameter (km)'], y=sub[pred_col], mode='markers', name=eng, text=sub['Asteroid'], marker=dict(size=12), hovertemplate="<b>%{text}</b><br>Engine: " + eng + "<br>Actual: %{x} km<br>Pred: %{y} km<extra></extra>"))
-            
-        mn, mx = self.df_summary['Actual Diameter (km)'].min() * 0.8, self.df_summary['Actual Diameter (km)'].max() * 1.2
-        fig.add_trace(go.Scatter(x=[mn, mx], y=[mn, mx], mode='lines', name='y = x', line=dict(color='#000000', dash='dash'), hoverinfo='skip'))
+            x_vals = pd.to_numeric(sub['Actual Diameter (km)'])
+            y_vals = pd.to_numeric(sub[pred_col])
+            fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode='markers', name=eng, text=sub['Asteroid'], marker=dict(size=12), hovertemplate="<b>%{text}</b><br>Engine: " + eng + "<br>Actual: %{x} km<br>Pred: %{y} km<extra></extra>"))
+        mn, mx = pd.to_numeric(self.df_summary['Actual Diameter (km)'].min()) * 0.8, pd.to_numeric(self.df_summary['Actual Diameter (km)'].max()) * 1.2
+        fig.add_trace(go.Scatter(x=[mn, mx], y=[mn, mx], mode='lines', name='Actual Size (y = x)', line=dict(color='#000000', dash='dash'), hoverinfo='skip'))
         ax_t = 'log' if 'Log' in scale else 'linear'
-        fig.update_layout(
-            title=title, height=480,
-            xaxis=dict(title='Actual Measured Diameter (km)', type=ax_t),
-            yaxis=dict(title='Predicted Model Diameter (km)', type=ax_t),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
-        )
+        fig.update_layout(title=title, height=480, xaxis=dict(title='Actual Measured Diameter (km)', type=ax_t), yaxis=dict(title='Predicted Model Diameter (km)', type=ax_t), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
         self.export_image(fig, filename_prefix=title.lower().replace(' ', '_'))
         return self.build_metrics_html(self.df_summary, pred_col), fig
 
@@ -124,12 +125,10 @@ def launch_interactive_plot(df_summary, plot_type='bar', is_test_run=False, pred
     plot_class = plot_factory.get(plot_type.lower(), GroupedBarChart)
     w_sc = widgets.ToggleButtons(options=['Log Scale', 'Linear Scale'], description='Scale:')
     w_met = widgets.HTML()
-    
     def callback(scale):
         plotter = plot_class(df_summary, is_test_run)
         metrics_html, fig = plotter.render(scale, pred_col=pred_col, **kwargs)
         w_met.value = metrics_html
         fig.show()
-        
     out = widgets.interactive_output(callback, {'scale': w_sc})
     display(w_met, out, widgets.HBox([w_sc], layout=widgets.Layout(padding='10px', justify_content='center')))
