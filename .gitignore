@@ -228,3 +228,5 @@ __pycache__/
 logs/*_test.csv
 *DNU_*
 **/*DNU_*
+scratchpad.py
+scratchpad.txt
