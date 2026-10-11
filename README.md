@@ -110,4 +110,8 @@ git lfs pull
 Open your notebook environment, navigate to `main.ipynb`, and run the master training block to automatically clear old logs, initialize the six-architecture matrix cross-validation loops, and update your local performance databases.
 ```bash
 jupyter notebook main.ipynb
+<<<<<<< HEAD
 ```
+=======
+```
+>>>>>>> dec3978b617c6e4f4da2387cc7cd19b37a695682
