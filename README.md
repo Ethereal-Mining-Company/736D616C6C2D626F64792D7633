@@ -8,7 +8,7 @@ Commissioned by the [Ethereal Mining Company (EMC)](https://github.com/Ethereal-
 >This is a fictional project as part of a broader D&D universe campaign for entertainment use only. It may be integrated into educational projects as flavor text to help simulate working in real-world environments.
 
 >[!NOTE]
->This `README.md` is flavor text for entertainment use only to be used with an educational project. The project data is from the [JPL NASA Small-Body Dataset](https://ssd.jpl.nasa.gov/tools/sbdb_query.html) that is being analyzed for a graded educational project.
+>This `README.md` contains flavor text for entertainment use only to be used with an educational project. The project data is from the [JPL NASA Small-Body Dataset](https://ssd.jpl.nasa.gov/tools/sbdb_query.html) that is being analyzed for a graded educational project.
 
 ## EXECUTIVE SUMMARY
 **Project Title:** Orbital Sizing & Assessment Protocol (OSAP) \
@@ -65,11 +65,11 @@ Performance metrics track both the **Full Feature Space** (including absolute ma
 
 | Rank | Model Architecture | Full Model Mean R² | Restricted Model Mean R² | Drop Impact (Δ R²) | Full Model MAE (km) | Restricted Model MAE (km) |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1** | **XGBoost Base** | **0.8548** | 0.3630 | 0.4917 | **1.0360** | 2.3461 |
-| **2** | **Random Forest Base** | **0.8508** | 0.3330 | 0.5178 | 1.0443 | 2.4090 |
-| **3** | **Keras FT-Transformer** | **0.8280** | **0.3104** | 0.5177 | 1.1435 | 2.4215 |
-| **4** | **Keras Tabular ResNet** | **0.8189** | 0.2487 | 0.5702 | 1.2734 | 8.3245 |
-| **5** | **Keras Wide & Deep** | **0.8053** | 0.2090 | 0.5963 | 1.2608 | 4.10 × 10²² |
+| **1** | **Gradient Boosting Regression** | **0.8548** | 0.3630 | 0.4917 | 1.0360| 2.3461 |
+| **2** | **Random Forest** | **0.8508** | 0.3330 | 0.5178 | 1.0443 | 2.4090 |
+| **3** | **FT-Transformer** | **0.8280** | 0.3104** | 0.5177 | 1.1435 | 2.4215 |
+| **4** | **Tabular ResNet** | **0.8189** | 0.2487 | 0.5702 | 1.2734 | 8.3245 |
+| **5** | **Wide & Deep** | **0.8053** | 0.2090 | 0.5963 | 1.2608 | 4.10 × 10²² |
 | **6** | **Gated ResNet** | **0.7887** | 0.1492 | 0.6396 | 4.4961 | *Exploded (≈ 10²¹)* |
 
 
