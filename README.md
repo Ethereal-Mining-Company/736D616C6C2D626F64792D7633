@@ -10,6 +10,9 @@ Commissioned by the [Ethereal Mining Company (EMC)](https://github.com/Ethereal-
 >[!NOTE]
 >This `README.md` contains flavor text for entertainment use only to be used with an educational project. The project data is from the [JPL NASA Small-Body Dataset](https://ssd.jpl.nasa.gov/tools/sbdb_query.html) that is being analyzed for a graded educational project.
 
+>[!IMPORTANT]
+>The term `XGBOOST` is used to refer to `Gradient Boosting Regression` (`GBR`) throughout the framework. This is to limit code refactoring and re-running training to replace `XGBOOST` with `GBR`.
+
 ## EXECUTIVE SUMMARY
 **Project Title:** Orbital Sizing & Assessment Protocol (OSAP) \
 **Description:** Predicting Asteroid Diameter Based on Photometric Parameters and Orbital Characteristics for Mining of Precious Metals for Use in MHD Satellites \
